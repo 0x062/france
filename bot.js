@@ -38,7 +38,7 @@ const config = {
 // ===================================================================================
 class PharosBot {
     constructor(privateKey, rpcUrl) {
-        this.provider = new ethers.JsonRpcProvider(rpcUrl);
+        this.provider = new ethers.WebSocketProvider(rpcUrl);
         this.wallet = new ethers.Wallet(privateKey, this.provider);
 
         this.PHRS_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
