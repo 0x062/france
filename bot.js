@@ -22,7 +22,7 @@ const config = {
     addLiquidityRepetitions: parseInt(ADD_LIQUIDITY_REPETITIONS, 10) || 1,
     minDelay: (parseInt(MIN_DELAY_SECONDS, 10) || 30) * 1000,
     maxDelay: (parseInt(MAX_DELAY_SECONDS, 10) || 60) * 1000,
-    gasBuffer: ethers.parseEther("0.001"),
+    // DIHAPUS: gasBuffer tidak lagi digunakan
     phrs: { min: parseFloat(PHRS_SWAP_MIN) || 0.01, max: parseFloat(PHRS_SWAP_MAX) || 0.05 },
     usdt: { min: parseFloat(USDT_SWAP_MIN) || 0.1, max: parseFloat(USDT_SWAP_MAX) || 1 },
     lp: {
@@ -93,7 +93,7 @@ async function performAdvancedTaskWithRetry(taskFunction, taskName) {
         } catch (e) {
             addLog(`Gagal mendapatkan data gas dari RPC: ${e.message}`, "error");
             addLog(`Membatalkan tugas ${taskName} karena masalah RPC.`, "warn");
-            return false; // Langsung gagal jika tidak bisa dapat fee data
+            return false;
         }
 
         if (attempt > 0) {
@@ -135,8 +135,8 @@ async function executeSwap(options) {
             amountToSwap = getRandomAmount(config.phrs.min, config.phrs.max);
         }
         const fromAmountInWei = ethers.parseUnits(amountToSwap.toFixed(decimals), decimals);
-        const requiredBalance = fromToken === PHRS_ADDRESS ? fromAmountInWei + config.gasBuffer : fromAmountInWei;
-        if (balance < requiredBalance) { addLog(`Saldo ${fromTokenName} tidak cukup. Melewati.`, "warn"); return true; }
+        // PERUBAHAN: Pengecekan gasBuffer dihapus
+        if (balance < fromAmountInWei) { addLog(`Saldo ${fromTokenName} tidak cukup. Melewati.`, "warn"); return true; }
         
         addLog(`Mempersiapkan swap ${amountToSwap.toFixed(4)} ${fromTokenName} dengan slippage ${slippage}%...`, "info");
         if (fromToken !== PHRS_ADDRESS) { if (!await checkAndApproveToken(new ethers.Contract(fromToken, ERC20_ABI, wallet), fromAmountInWei, fromTokenName, ROUTER_ADDRESS, txOptions)) return false; }
@@ -183,7 +183,8 @@ async function performLiquidityAddition(options) {
         if (wphrsBalance < wphrsNeeded) {
             addLog(`Saldo WPHRS tidak cukup. Mencoba wrap PHRS...`, "warn");
             const phrsToWrap = wphrsNeeded - wphrsBalance;
-            if (phrsBalance < phrsToWrap + config.gasBuffer) { addLog(`Saldo PHRS tidak cukup untuk di-wrap. Melewati.`, "error"); return true; }
+            // PERUBAHAN: Pengecekan gasBuffer dihapus
+            if (phrsBalance < phrsToWrap) { addLog(`Saldo PHRS tidak cukup untuk di-wrap. Melewati.`, "error"); return true; }
             if (!(await wrapPhrs({amountToWrap: phrsToWrap, txOptions}))) return false;
         }
         const usdtContract = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, wallet);
@@ -211,11 +212,11 @@ async function swapAllUsdtToPhrs(options) {
     const { slippage, txOptions } = options;
     addLog(chalk.bold.magenta("--- Memulai Cleanup: Swap semua USDT ke PHRS ---"), "info");
     try {
-        const phrsBalance = await provider.getBalance(wallet.address);
-        if (phrsBalance < config.gasBuffer) { addLog("Saldo PHRS tidak cukup untuk gas fee cleanup. Melewati.", "warn"); return true; }
+        // PERUBAHAN: Pengecekan gasBuffer dihapus
         const usdtContract = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, wallet);
         const usdtBalance = await usdtContract.balanceOf(wallet.address);
         if (usdtBalance < ethers.parseUnits("0.01", 6)) { addLog("Saldo USDT terlalu kecil untuk cleanup.", "info"); return true; }
+
         addLog(`Menukar semua ${ethers.formatUnits(usdtBalance, 6)} USDT...`, "info");
         if (!await checkAndApproveToken(usdtContract, usdtBalance, "USDT", ROUTER_ADDRESS, txOptions)) return false;
         
@@ -238,11 +239,11 @@ async function unwrapAllWphrs(options) {
     const { txOptions } = options;
     addLog(chalk.bold.magenta("--- Memulai Cleanup: Unwrap semua WPHRS ke PHRS ---"), "info");
     try {
-        const phrsBalance = await provider.getBalance(wallet.address);
-        if (phrsBalance < config.gasBuffer) { addLog("Saldo PHRS tidak cukup untuk gas fee cleanup. Melewati.", "warn"); return true; }
+        // PERUBAHAN: Pengecekan gasBuffer dihapus
         const wphrsContract = new ethers.Contract(WPHRS_ADDRESS, WPHRS_ABI, wallet);
         const wphrsBalance = await wphrsContract.balanceOf(wallet.address);
         if (wphrsBalance <= 0) { addLog("Tidak ada saldo WPHRS untuk di-unwrap.", "info"); return true; }
+
         addLog(`Unwrapping semua ${ethers.formatEther(wphrsBalance)} WPHRS...`, "info");
         const tx = await wphrsContract.withdraw(wphrsBalance, { nonce: await getNextNonce(), ...txOptions });
         addLog(`Unwrap terkirim. Hash: ${tx.hash.slice(0,12)}...`, "success");
@@ -260,8 +261,9 @@ async function main() {
     console.log(chalk.blue.bold('\n--- Memulai Bot dengan Strategi Lengkap ---'));
     addLog(`Wallet: ${getShortAddress(wallet.address)}`, "info");
     
-    const initialBalances = await checkBalances();
-    if (initialBalances.phrsBalance < config.gasBuffer) { addLog(`SALDO PHRS TIDAK CUKUP UNTUK BIAYA GAS. Proses dihentikan.`, "error"); return; }
+    // PERUBAHAN: Pengecekan gasBuffer awal dihapus
+    await checkBalances();
+
     if (!await loginAndGetJwt()) { addLog("Proses dihentikan karena login gagal.", "error"); return; }
 
     // FASE 1: MODUL SWAP
