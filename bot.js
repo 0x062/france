@@ -32,7 +32,7 @@ const config = {
     retry: {
         maxAttempts: 3,
         slippageTiers: [0.5, 2, 5], // %
-        gasMultiplier: parseFloat(GAS_PRICE_MULTIPLIER_ON_RETRY) || 1.2, // 20% increase
+        gasMultiplier: parseFloat(GAS_PRICE_MULTIPLIER_ON_RETRY) || 1.2,
     }
 };
 
@@ -91,10 +91,17 @@ async function makeApiRequest(method, url, data, customHeaders = {}, maxRetries 
 async function getNextNonce() { try { const pendingNonce = await provider.getTransactionCount(wallet.address, "pending"); const lastUsedNonce = nonceTracker[wallet.address] || pendingNonce - 1; const nextNonce = Math.max(pendingNonce, lastUsedNonce + 1); nonceTracker[wallet.address] = nextNonce; return nextNonce; } catch (error) { addLog(`Gagal mendapatkan nonce: ${error.message}`, "error"); throw error; } }
 async function checkAndApproveToken(tokenContract, amount, tokenName, spenderAddress, txOptions) { try { const allowance = await tokenContract.allowance(wallet.address, spenderAddress); if (allowance < amount) { addLog(`Melakukan approve untuk ${ethers.formatUnits(amount, tokenName === 'USDT' ? 6 : 18)} ${tokenName}...`, "info"); const nonce = await getNextNonce(); const tx = await tokenContract.approve(spenderAddress, ethers.MaxUint256, { ...txOptions, nonce }); addLog(`Approval terkirim. Hash: ${tx.hash.slice(0,12)}...`, "success"); await tx.wait(); addLog(`Approval untuk ${tokenName} berhasil.`, "success"); } return true; } catch (error) { addLog(`Gagal approve ${tokenName}: ${error.message}`, "error"); return false; } }
 async function loginAndGetJwt() { addLog("Mencoba login untuk mendapatkan JWT...", "info"); try { const message = "pharos"; const signature = await wallet.signMessage(message); const loginUrl = `${API_BASE_URL}/user/login?address=${wallet.address}&signature=${signature}`; const loginResponse = await makeApiRequest("post", loginUrl); if (loginResponse.code === 0 && loginResponse.data.jwt) { jwtToken = loginResponse.data.jwt; addLog("Login berhasil, JWT diterima.", "success"); return true; } else { addLog(`Login gagal: ${loginResponse.msg}`, "error"); return false; } } catch (error) { addLog(`Error saat login: ${error.message}`, "error"); return false; } }
-async function checkBalances() { addLog("Mengecek saldo wallet...", "info"); try { const [phrsBalance, usdtBalance, wphrsBalance] = await Promise.all([provider.getBalance(wallet.address), new ethers.Contract(USDT_ADDRESS, ERC20_ABI, provider).balanceOf(wallet.address), new ethers.Contract(WPHRS_ADDRESS, ERC20_ABI, provider).balanceOf(wallet.address)]); addLog(`PHRS: ${chalk.cyan(parseFloat(ethers.formatEther(phrsBalance)).toFixed(4))}`, "info"); addLog(`USDT: ${chalk.cyan(parseFloat(ethers.formatUnits(usdtBalance, 6)).toFixed(4))}`, "info"); addLog(`WPHRS: ${chalk.cyan(parseFloat(ethers.formatEther(wphrsBalance)).toFixed(4))}`, "info"); return { phrsBalance, usdtBalance, wphrsBalance }; } catch (error) { addLog(`Gagal mengecek saldo: ${error.message}`, "error"); throw new Error(`Tidak bisa melanjutkan karena gagal mengecek saldo awal.`); } }
+async function checkBalances() { addLog("Mengecek saldo wallet...", "info"); try { const [phrsBalance, usdtBalance, wphrsBalance] = await Promise.all([provider.getBalance(wallet.address), new ethers.Contract(USDT_ADDRESS, ERC20_ABI, provider).balanceOf(wallet.address), new ethers.Contract(WPHRS_ADDRESS, ERC20_ABI, provider).balanceOf(wallet.address)]); addLog(`PHRS: ${chalk.yellow(parseFloat(ethers.formatEther(phrsBalance)).toFixed(4))}`, "info"); addLog(`USDT: ${chalk.yellow(parseFloat(ethers.formatUnits(usdtBalance, 6)).toFixed(4))}`, "info"); addLog(`WPHRS: ${chalk.yellow(parseFloat(ethers.formatEther(wphrsBalance)).toFixed(4))}`, "info"); return { phrsBalance, usdtBalance, wphrsBalance }; } catch (error) { addLog(`Gagal mengecek saldo: ${error.message}`, "error"); throw new Error(`Tidak bisa melanjutkan karena gagal mengecek saldo awal.`); } }
 
 async function performAdvancedTaskWithRetry(taskFunction, taskName) {
-    let feeData = await provider.getFeeData();
+    let feeData;
+    try {
+        feeData = await provider.getFeeData();
+    } catch (e) {
+        addLog(`Gagal mendapatkan fee data awal: ${e.message}`, "error");
+        return false;
+    }
+
     for (let attempt = 0; attempt < config.retry.maxAttempts; attempt++) {
         addLog(`Menjalankan ${taskName}, percobaan ke-${attempt + 1}...`, "info");
         const slippage = config.retry.slippageTiers[attempt] || config.retry.slippageTiers.at(-1);
@@ -111,8 +118,12 @@ async function performAdvancedTaskWithRetry(taskFunction, taskName) {
 
         addLog(`${taskName} gagal pada percobaan ke-${attempt + 1}.`, "warn");
         if (attempt < config.retry.maxAttempts - 1) {
-            // Naikkan gas fee untuk percobaan berikutnya
-            const multiplier = BigInt(Math.floor(config.retry.gasMultiplier * 100));
+            // PERBAIKAN: Safety check sebelum menaikkan gas fee
+            if (!feeData.maxFeePerGas || !feeData.maxPriorityFeePerGas) {
+                addLog("Tidak bisa mendapatkan data gas yang valid untuk menaikkan fee. Membatalkan retry.", "error");
+                break;
+            }
+            const multiplier = BigInt(Math.round(config.retry.gasMultiplier * 100));
             feeData.maxFeePerGas = (feeData.maxFeePerGas * multiplier) / 100n;
             feeData.maxPriorityFeePerGas = (feeData.maxPriorityFeePerGas * multiplier) / 100n;
             addLog(`Menaikkan gas fee untuk percobaan berikutnya...`, "wait");
@@ -166,41 +177,49 @@ async function executeSwap(options) {
     }
 }
 
-// ... (Sisa fungsi seperti wrap, add LP, cleanup akan kita buat juga untuk menerima txOptions)
+// ... (Sisa fungsi seperti Add LP dan Cleanup tidak perlu diubah, mereka akan otomatis menggunakan retry wrapper)
 
 // ===================================================================================
 // FUNGSI UTAMA (MAIN EXECUTION)
 // ===================================================================================
 async function main() {
-    addLog(chalk.bold.cyan("================================================="));
-    addLog(chalk.bold.cyan("      MEMULAI BOT DENGAN STRATEGI ADAPTIF      "));
-    addLog(chalk.bold.cyan("================================================="));
-    addLog(`Wallet: ${getShortAddress(wallet.address)}`);
+    // PERBAIKAN: Header log yang lebih bersih
+    console.log(chalk.blue.bold('\n--- Memulai Bot dengan Strategi Adaptif ---'));
+    addLog(`Wallet: ${getShortAddress(wallet.address)}`, "info");
+    
     const initialBalances = await checkBalances();
-    if (initialBalances.phrsBalance < config.gasBuffer) { addLog(`SALDO PHRS TIDAK CUKUP UNTUK BIAYA GAS. Proses dihentikan.`, "error"); return; }
-    if (!await loginAndGetJwt()) { addLog("Proses dihentikan karena login gagal.", "error"); return; }
+    if (initialBalances.phrsBalance < config.gasBuffer) {
+        addLog(`SALDO PHRS TIDAK CUKUP UNTUK BIAYA GAS. Proses dihentikan.`, "error");
+        return;
+    }
+    if (!await loginAndGetJwt()) {
+        addLog("Proses dihentikan karena login gagal.", "error");
+        return;
+    }
 
     // --- FASE 1: MODUL SWAP ---
-    addLog(chalk.bold.blue("--- Memulai Modul Swap ---"), "info");
+    addLog(chalk.blue.bold("--- Memulai Modul Swap ---"), "info");
     for (let i = 1; i <= config.swapRepetitions; i++) {
         const isPHRSToUSDT = i % 2 === 1;
+        // PERBAIKAN BUG: Memasukkan parameter fromToken dan toToken ke dalam options
         await performAdvancedTaskWithRetry(async (options) => {
-            options.fromToken = isPHRSToUSDT ? PHRS_ADDRESS : USDT_ADDRESS;
-            options.toToken = isPHRSToUSDT ? USDT_ADDRESS : PHRS_ADDRESS;
-            return await executeSwap(options);
+            const taskOptions = {
+                ...options,
+                fromToken: isPHRSToUSDT ? PHRS_ADDRESS : USDT_ADDRESS,
+                toToken: isPHRSToUSDT ? USDT_ADDRESS : PHRS_ADDRESS
+            };
+            return await executeSwap(taskOptions);
         }, `Swap #${i}`);
+        
         if (i < config.swapRepetitions) await sleep(randomDelay());
     }
 
     // --- FASE 2 & 3 (Add LP & Cleanup) ---
-    // Logika untuk Add LP dan Cleanup bisa diintegrasikan dengan cara yang sama
-    // Untuk saat ini, kita fokus pada pembuktian konsep di modul swap.
-
+    // Logika untuk Add LP dan Cleanup akan kita implementasikan di iterasi berikutnya jika swap sudah stabil
+    
     await sleep(5000);
     await checkBalances();
-    addLog(chalk.bold.green("================================================="));
-    addLog(chalk.bold.green("        SIKLUS STRATEGI TELAH SELESAI          "));
-    addLog(chalk.bold.green("================================================="));
+    console.log(chalk.green.bold('--- Siklus Strategi Telah Selesai ---\n'));
 }
 
 main().catch(error => {
