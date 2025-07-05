@@ -2,7 +2,7 @@ import chalk from "chalk";
 import { ethers } from "ethers";
 import fs from "fs";
 import axios from "axios";
-import 'dotenv/config'; // Impor dan konfigurasikan dotenv di baris paling atas
+import 'dotenv/config';
 
 // ===================================================================================
 // VALIDASI DAN MEMUAT KONFIGURASI DARI .ENV
@@ -27,13 +27,12 @@ const config = {
     swapRepetitions: parseInt(SWAP_REPETITIONS, 10) || 5,
     sendPhrsRepetitions: parseInt(SEND_PHRS_REPETITIONS, 10) || 3,
     addLiquidityRepetitions: parseInt(ADD_LIQUIDITY_REPETITIONS, 10) || 2,
-    minDelay: (parseInt(MIN_DELAY_SECONDS, 10) || 30) * 1000, // dalam milidetik
-    maxDelay: (parseInt(MAX_DELAY_SECONDS, 10) || 60) * 1000, // dalam milidetik
+    minDelay: (parseInt(MIN_DELAY_SECONDS, 10) || 30) * 1000,
+    maxDelay: (parseInt(MAX_DELAY_SECONDS, 10) || 60) * 1000,
 };
 
-
 // ===================================================================================
-// KONSTANTA & ALAMAT KONTRAK (TETAP SAMA)
+// KONSTANTA & ALAMAT KONTRAK
 // ===================================================================================
 
 const PHRS_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
@@ -48,7 +47,7 @@ let nonceTracker = {};
 let jwtToken = null;
 
 // ===================================================================================
-// ABI KONTRAK (TETAP SAMA)
+// ABI KONTRAK
 // ===================================================================================
 
 const ERC20_ABI = ["function balanceOf(address owner) view returns (uint256)", "function approve(address spender, uint256 amount) returns (bool)", "function allowance(address owner, address spender) view returns (uint256)"];
@@ -56,7 +55,7 @@ const ROUTER_ABI = ["function mixSwap(address fromToken, address toToken, uint25
 const LP_ABI = ["function addDVMLiquidity(address dvmAddress, uint256 baseInAmount, uint256 quoteInAmount, uint256 baseMinAmount, uint256 quoteMinAmount, uint8 flag, uint256 deadLine) external payable returns (uint256, uint256, uint256)"];
 
 // ===================================================================================
-// FUNGSI UTILITAS (DISIMPLIFIKASI)
+// FUNGSI UTILITAS
 // ===================================================================================
 
 function addLog(message, type = "info") {
@@ -98,19 +97,37 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // ===================================================================================
-// FUNGSI INTI (TELAH DI-REFACTOR)
+// FUNGSI INTI (DENGAN PERBAIKAN)
 // ===================================================================================
+
+// PERBAIKAN: Menambahkan header default yang lebih lengkap untuk menghindari blokir 403
+const getApiHeaders = (customHeaders = {}) => ({
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Origin": "https://testnet.pharosnetwork.xyz",
+    "Referer": "https://testnet.pharosnetwork.xyz/",
+    ...customHeaders
+});
 
 async function makeApiRequest(method, url, data, customHeaders = {}, maxRetries = 3) {
     let lastError = null;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            const config = { method, url, data, headers: { ...customHeaders }, timeout: 10000 };
+            const headers = getApiHeaders(customHeaders);
+            const config = { method, url, data, headers, timeout: 15000 };
             const response = await axios(config);
             return response.data;
         } catch (error) {
             lastError = error;
-            addLog(`API request ke ${url} gagal (percobaan ${attempt}/${maxRetries}): ${error.message}`, "error");
+            let errorMessage = `API request ke ${url} gagal (percobaan ${attempt}/${maxRetries}): `;
+            if (error.response) {
+                errorMessage += `Status code ${error.response.status} - ${JSON.stringify(error.response.data)}`;
+            } else {
+                errorMessage += error.message;
+            }
+            addLog(errorMessage, "error");
             if (attempt < maxRetries) await sleep(2000);
         }
     }
@@ -135,7 +152,7 @@ async function checkAndApproveToken(tokenAddress, amount, tokenName, spenderAddr
         const token = new ethers.Contract(tokenAddress, ERC20_ABI, wallet);
         const allowance = await token.allowance(wallet.address, spenderAddress);
         if (allowance < amount) {
-            addLog(`Melakukan approve untuk ${ethers.formatUnits(amount, tokenName === 'USDT' ? 6: 18)} ${tokenName}...`, "info");
+            addLog(`Melakukan approve untuk ${ethers.formatUnits(amount, tokenName === 'USDT' ? 6 : 18)} ${tokenName}...`, "info");
             const nonce = await getNextNonce();
             const tx = await token.approve(spenderAddress, ethers.MaxUint256, { nonce });
             addLog(`Approval terkirim. Hash: ${getShortHash(tx.hash)}`, "success");
@@ -168,10 +185,10 @@ async function executeSwap(swapCount, fromToken, toToken, amount) {
             addLog(`Gagal mendapatkan rute dari Dodo: ${routeResponse?.message || 'No response'}`, "error");
             return false;
         }
-        
+
         const { to, data, value } = routeResponse.data;
         const tx = { to, data, value: value ? ethers.parseUnits(value, "wei") : 0, nonce: await getNextNonce(), gasLimit: 500000 };
-        
+
         const sentTx = await wallet.sendTransaction(tx);
         addLog(`Swap #${swapCount}: Transaksi terkirim. Hash: ${getShortHash(sentTx.hash)}`, "success");
         await sentTx.wait();
@@ -189,7 +206,7 @@ async function performLiquidityAddition(lpCount) {
         const lpRouter = new ethers.Contract(LP_ADDRESS, LP_ABI, wallet);
         const baseInAmount = ethers.parseUnits("0.002", 18); // WPHRS
         const quoteInAmount = ethers.parseUnits("1", 6);   // USDT
-        
+
         if (!await checkAndApproveToken(WPHRS_ADDRESS, baseInAmount, "WPHRS", LP_ADDRESS)) return false;
         if (!await checkAndApproveToken(USDT_ADDRESS, quoteInAmount, "USDT", LP_ADDRESS)) return false;
 
@@ -209,7 +226,6 @@ async function performLiquidityAddition(lpCount) {
         return false;
     }
 }
-
 
 async function loginAndGetJwt() {
     addLog("Mencoba login untuk mendapatkan JWT...", "info");
@@ -264,8 +280,10 @@ async function checkBalances() {
         addLog(`PHRS: ${chalk.cyan(parseFloat(ethers.formatEther(phrsBalance)).toFixed(4))}`, "info");
         addLog(`USDT: ${chalk.cyan(parseFloat(ethers.formatUnits(usdtBalance, 6)).toFixed(4))}`, "info");
         addLog(`WPHRS: ${chalk.cyan(parseFloat(ethers.formatEther(wphrsBalance)).toFixed(4))}`, "info");
-    } catch(error) {
+    } catch (error) {
         addLog(`Gagal mengecek saldo: ${error.message}`, "error");
+        // PERBAIKAN: Melempar error agar proses utama berhenti jika saldo tidak bisa dicek
+        throw new Error(`Tidak bisa melanjutkan karena gagal mengecek saldo awal. Pastikan RPC benar.`);
     }
 }
 
@@ -278,7 +296,7 @@ async function main() {
     addLog(chalk.bold.yellow("         MEMULAI PROSES OTOMATISASI          "));
     addLog(chalk.bold.yellow("================================================="));
     addLog(`Wallet: ${getShortAddress(wallet.address)}`);
-    
+
     await checkBalances();
 
     if (!await loginAndGetJwt()) {
@@ -294,7 +312,7 @@ async function main() {
         const amount = isPHRSToUSDT
             ? (Math.random() * (0.004 - 0.001) + 0.001).toFixed(4)
             : (Math.random() * (10 - 5) + 5).toFixed(4);
-        
+
         await executeSwap(i, fromToken, toToken, amount);
         if (i < config.swapRepetitions) await sleep(randomDelay());
     }
@@ -307,7 +325,7 @@ async function main() {
 
     // --- 3. Daily Check-in ---
     await dailyCheckIn();
-    
+
     await sleep(5000);
     await checkBalances();
 
@@ -316,8 +334,8 @@ async function main() {
     addLog(chalk.bold.green("================================================="));
 }
 
-// Menjalankan fungsi utama
+// Menjalankan fungsi utama dengan penanganan error yang lebih baik
 main().catch(error => {
-    addLog(`Terjadi kesalahan fatal: ${error.message}`, "error");
+    addLog(`Terjadi kesalahan fatal yang tidak tertangani: ${error.message}`, "error");
     process.exit(1);
 });
