@@ -29,7 +29,7 @@ const config = {
     phrs: { min: parseFloat(PHRS_SWAP_MIN) || 0.01, max: parseFloat(PHRS_SWAP_MAX) || 0.05 },
     usdt: { min: parseFloat(USDT_SWAP_MIN) || 0.1, max: parseFloat(USDT_SWAP_MAX) || 1 },
     lp: {
-        wphrs: LP_WPHRS_AMOUNT || "0.02",
+        phrs: LP_WPHRS_AMOUNT || "0.02", // Menggunakan PHRS untuk addLiquidityETH
         usdt: LP_USDT_AMOUNT || "0.5"
     }
 };
@@ -42,19 +42,20 @@ class PharosBot {
         this.provider = new ethers.JsonRpcProvider(rpcUrl);
         this.wallet = new ethers.Wallet(privateKey, this.provider);
 
-        // --- Alamat Kontrak ---
         this.PHRS_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
         this.WPHRS_ADDRESS = "0x3019B247381c850ab53Dc0EE53bCe7A07Ea9155f";
         this.USDT_ADDRESS = "0xD4071393f8716661958F766DF660033b3d35fD29";
-        // Tambahkan token lain jika perlu
         
-        // PERUBAHAN KUNCI: Menggunakan Router Uniswap V2 yang Stabil
         this.UNISWAP_ROUTER_ADDRESS = "0xf05Af5E9dC3b1dd3ad0C087BD80D7391283775e0";
 
-        // --- ABI (Application Binary Interface) ---
         this.ERC20_ABI = ["function balanceOf(address) view returns (uint256)", "function approve(address, uint256) returns (bool)", "function allowance(address, address) view returns (uint256)", "function decimals() view returns (uint8)"];
         this.WPHRS_ABI = [...this.ERC20_ABI, "function deposit() payable", "function withdraw(uint256)"];
-        this.UNISWAP_ROUTER_ABI = ["function getAmountsOut(uint256, address[]) view returns (uint256[])", "function addLiquidity(address, address, uint256, uint256, uint256, uint256, address, uint256) returns (uint, uint, uint)", "function addLiquidityETH(address, uint256, uint256, uint256, address, uint256) payable returns (uint, uint, uint)", "function swapExactTokensForETH(uint, uint, address[], address, uint)", "function swapExactETHForTokens(uint, address[], address, uint) payable"];
+        this.UNISWAP_ROUTER_ABI = [
+            "function getAmountsOut(uint256, address[]) view returns (uint256[])",
+            "function addLiquidityETH(address token, uint amountTokenDesired, uint amountTokenMin, uint amountETHMin, address to, uint deadline) payable returns (uint amountToken, uint amountETH, uint liquidity)",
+            "function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) returns (uint[] memory amounts)",
+            "function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) payable returns (uint[] memory amounts)"
+        ];
 
         this.routerContract = new ethers.Contract(this.UNISWAP_ROUTER_ADDRESS, this.UNISWAP_ROUTER_ABI, this.wallet);
     }
@@ -62,7 +63,7 @@ class PharosBot {
     log(message, type = 'info') {
         const timestamp = moment().tz('Asia/Jakarta').format('HH:mm:ss');
         const colors = { info: 'white', success: 'green', error: 'red', warn: 'yellow' };
-        console.log(`${chalk.bold.cyan(`[${timestamp}]`)} | ${chalk[colors[type]](message)}`);
+        console.log(`${chalk.bold.cyan(`[${timestamp}]`)} | ${chalk[colors[type] || 'white'](message)}`);
     }
 
     sleep(ms) {
@@ -73,12 +74,17 @@ class PharosBot {
         return Math.floor(Math.random() * (config.maxDelay - config.minDelay + 1)) + config.minDelay;
     }
 
+    // --- PERBAIKAN 1: Menambahkan kembali fungsi getRandomAmount sebagai method ---
+    getRandomAmount(min, max) {
+        return Math.random() * (max - min) + min;
+    }
+
     getTokenAddress(ticker) {
         return this[`${ticker}_ADDRESS`] || null;
     }
     
     async waitForTx(txHash) {
-        this.log(`Menunggu transaksi: ${chalk.yellow(txHash.slice(0, 15))}...`, 'wait');
+        this.log(`Menunggu transaksi: ${chalk.yellow(txHash.slice(0, 15))}...`, 'warn');
         try {
             const receipt = await this.provider.waitForTransaction(txHash, 1, 180000);
             if (receipt && receipt.status === 1) {
@@ -116,20 +122,34 @@ class PharosBot {
         const path = [fromAddress, toAddress];
 
         try {
-            const fromContract = new ethers.Contract(fromAddress, this.ERC20_ABI, this.provider);
-            const decimals = await fromContract.decimals();
-            const amountIn = ethers.parseUnits(amountDecimal.toString(), Number(decimals));
+            const isSwappingFromNative = fromTicker === 'PHRS';
+            const isSwappingToNative = toTicker === 'PHRS';
 
-            const amountsOut = await this.routerContract.getAmountsOut(amountIn, path);
-            const amountOutMin = (amountsOut[1] * BigInt(10000 - config.slippage * 100)) / 10000n;
-            
-            if (!(await this.approve(fromAddress, amountIn))) return false;
+            let amountIn, tx;
 
-            const tx = await this.routerContract.swapExactTokensForETH(
-                amountIn, amountOutMin, path, this.wallet.address,
-                Math.floor(Date.now() / 1000) + 600
-            );
+            if (isSwappingFromNative) {
+                amountIn = ethers.parseEther(amountDecimal.toString());
+                const amountsOut = await this.routerContract.getAmountsOut(amountIn, path);
+                const amountOutMin = (amountsOut[1] * BigInt(10000 - config.slippage * 100)) / 10000n;
+                tx = await this.routerContract.swapExactETHForTokens(amountOutMin, path, this.wallet.address, Math.floor(Date.now() / 1000) + 600, { value: amountIn });
+            } else {
+                const fromContract = new ethers.Contract(fromAddress, this.ERC20_ABI, this.provider);
+                const decimals = await fromContract.decimals();
+                amountIn = ethers.parseUnits(amountDecimal.toString(), Number(decimals));
 
+                if (!(await this.approve(fromAddress, amountIn))) return false;
+
+                const amountsOut = await this.routerContract.getAmountsOut(amountIn, path);
+                const amountOutMin = (amountsOut[1] * BigInt(10000 - config.slippage * 100)) / 10000n;
+                
+                if (isSwappingToNative) {
+                    tx = await this.routerContract.swapExactTokensForETH(amountIn, amountOutMin, path, this.wallet.address, Math.floor(Date.now() / 1000) + 600);
+                } else {
+                    // Logika untuk Token -> Token (tidak ada di skenario kita saat ini, tapi bisa ditambahkan)
+                    this.log('Swap Token -> Token belum diimplementasikan sepenuhnya.', 'warn');
+                    return false;
+                }
+            }
             return await this.waitForTx(tx.hash);
         } catch(e) {
             this.log(`Swap gagal: ${e.message}`, 'error');
@@ -141,13 +161,20 @@ class PharosBot {
         this.log(`Mempersiapkan Add LP: ${phrsAmountDecimal} PHRS dengan ${tokenTicker}`, 'info');
         try {
             const tokenAddress = this.getTokenAddress(tokenTicker);
-            const phrsAmount = ethers.parseEther(phrsAmountDecimal);
+            const tokenContract = new ethers.Contract(tokenAddress, this.ERC20_ABI, this.provider);
+            const tokenDecimals = await tokenContract.decimals();
+            const phrsAmount = ethers.parseEther(phrsAmountDecimal.toString());
 
-            if (!(await this.approve(tokenAddress, MaxUint256))) return;
+            const amountsOut = await this.routerContract.getAmountsOut(phrsAmount, [this.WPHRS_ADDRESS, tokenAddress]);
+            const tokenAmountDesired = amountsOut[1];
+
+            this.log(`Dibutuhkan sekitar ${ethers.formatUnits(tokenAmountDesired, tokenDecimals)} ${tokenTicker}`);
+
+            if (!(await this.approve(tokenAddress, tokenAmountDesired))) return;
 
             const tx = await this.routerContract.addLiquidityETH(
-                tokenAddress, phrsAmount, 0, 0, this.wallet.address,
-                Math.floor(Date.now() / 1000) + 600,
+                tokenAddress, tokenAmountDesired, 0, 0, // kita set amountMin ke 0 untuk simple
+                this.wallet.address, Math.floor(Date.now() / 1000) + 600,
                 { value: phrsAmount }
             );
             return await this.waitForTx(tx.hash);
@@ -163,14 +190,16 @@ class PharosBot {
             const tokenAddress = this.getTokenAddress(tokenTicker);
             const tokenContract = new ethers.Contract(tokenAddress, this.ERC20_ABI, this.provider);
             const balance = await tokenContract.balanceOf(this.wallet.address);
-
+            const decimals = await tokenContract.decimals();
+            
             if (balance <= 0) {
                 this.log(`Tidak ada saldo ${tokenTicker} untuk di-cleanup.`, 'info');
                 return true;
             }
 
-            this.log(`Menukar semua sisa ${ethers.formatUnits(balance, await tokenContract.decimals())} ${tokenTicker} ke PHRS...`);
-            return await this.swap(tokenTicker, 'PHRS', ethers.formatUnits(balance, await tokenContract.decimals()));
+            const balanceDecimal = ethers.formatUnits(balance, decimals);
+            this.log(`Menukar semua sisa ${balanceDecimal} ${tokenTicker} ke PHRS...`);
+            return await this.swap(tokenTicker, 'PHRS', balanceDecimal);
 
         } catch (e) {
             this.log(`Cleanup ${tokenTicker} gagal: ${e.message}`, 'error');
@@ -188,24 +217,34 @@ class PharosBot {
             this.log(`--- Swap #${i + 1}/${config.swapRepetitions} ---`, 'info');
             const from = i % 2 === 0 ? 'PHRS' : 'USDT';
             const to = i % 2 === 0 ? 'USDT' : 'PHRS';
-            const amount = from === 'PHRS' ? getRandomAmount(config.phrs.min, config.phrs.max).toFixed(4) : getRandomAmount(config.usdt.min, config.usdt.max).toFixed(4);
+            
+            // --- PERBAIKAN 2: Memanggil fungsi dengan `this.` ---
+            const amount = from === 'PHRS' 
+                ? this.getRandomAmount(config.phrs.min, config.phrs.max).toFixed(5) 
+                : this.getRandomAmount(config.usdt.min, config.usdt.max).toFixed(5);
+            
             await this.swap(from, to, amount);
-            await this.sleep(this.randomDelay());
-        }
 
+            if (i < config.swapRepetitions - 1 || config.addLiquidityRepetitions > 0) {
+                const delay = this.randomDelay();
+                this.log(`Menunggu ${delay / 1000} detik...`, 'wait');
+                await this.sleep(delay);
+            }
+        }
+        
         // FASE 2: ADD LIQUIDITY
         this.log(chalk.blue.bold('\n--- FASE 2: Menambah Likuiditas ---'));
         for (let i = 0; i < config.addLiquidityRepetitions; i++) {
             this.log(`--- Add LP #${i + 1}/${config.addLiquidityRepetitions} ---`, 'info');
             await this.addLiquidity('USDT', config.lp.phrs);
-            await this.sleep(this.randomDelay());
+            if (i < config.addLiquidityRepetitions - 1 || true) { // Selalu delay sebelum cleanup
+                await this.sleep(this.randomDelay());
+            }
         }
 
         // FASE 3: CLEANUP
         this.log(chalk.blue.bold('\n--- FASE 3: Cleanup Aset ---'));
         await this.cleanup('USDT');
-        // Tambahkan cleanup untuk token lain jika perlu
-        // await this.cleanup('WPHRS');
 
         this.log(chalk.green.bold('\n--- Semua Tugas Selesai ---'));
     }
@@ -219,7 +258,7 @@ async function main() {
         const bot = new PharosBot(PRIVATE_KEY, RPC_URL);
         await bot.run();
     } catch (e) {
-        console.log(chalk.red(`\n❌ Terjadi kesalahan fatal: ${e.message}`));
+        console.log(chalk.red(`\n❌ Terjadi kesalahan fatal: ${e.stack}`));
     }
 }
 
