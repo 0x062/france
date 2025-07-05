@@ -12,7 +12,13 @@ const {
     PRIVATE_KEY,
     RPC_URL,
     SWAP_REPETITIONS,
-    // Variabel lain yang mungkin Anda tambahkan nanti
+    MIN_DELAY_SECONDS,
+    MAX_DELAY_SECONDS,
+    // PERUBAHAN: Membaca variabel range swap dari .env
+    PHRS_SWAP_MIN,
+    PHRS_SWAP_MAX,
+    USDT_SWAP_MIN,
+    USDT_SWAP_MAX,
 } = process.env;
 
 if (!PRIVATE_KEY || !RPC_URL) {
@@ -21,11 +27,20 @@ if (!PRIVATE_KEY || !RPC_URL) {
 }
 
 const config = {
-    swapRepetitions: parseInt(SWAP_REPETITIONS, 10) || 5,
-    minDelay: 30 * 1000,
-    maxDelay: 60 * 1000,
-    // Cadangan gas fee dalam PHRS
-    gasBuffer: ethers.parseEther("0.0005")
+    swapRepetitions: parseInt(SWAP_REPETITIONS, 10) || 4,
+    minDelay: (parseInt(MIN_DELAY_SECONDS, 10) || 30) * 1000,
+    maxDelay: (parseInt(MAX_DELAY_SECONDS, 10) || 60) * 1000,
+    gasBuffer: ethers.parseEther("0.0005"),
+
+    // PERUBAHAN: Menyimpan konfigurasi range swap
+    phrs: {
+        min: parseFloat(PHRS_SWAP_MIN) || 0.01,
+        max: parseFloat(PHRS_SWAP_MAX) || 0.1,
+    },
+    usdt: {
+        min: parseFloat(USDT_SWAP_MIN) || 0.1,
+        max: parseFloat(USDT_SWAP_MAX) || 1,
+    },
 };
 
 // ===================================================================================
@@ -38,7 +53,6 @@ const USDT_ADDRESS = "0xd4071393f8716661958f766df660033b3d35fd29";
 const ROUTER_ADDRESS = "0x3541423f25a1ca5c98fdbcf478405d3f0aad1164";
 const LP_ADDRESS = "0x4b177aded3b8bd1d5d747f91b9e853513838cd49";
 const API_BASE_URL = "https://api.pharosnetwork.xyz";
-const isDebug = false;
 let nonceTracker = {};
 let jwtToken = null;
 
@@ -47,8 +61,6 @@ let jwtToken = null;
 // ===================================================================================
 
 const ERC20_ABI = ["function balanceOf(address owner) view returns (uint256)", "function approve(address spender, uint256 amount) returns (bool)", "function allowance(address owner, address spender) view returns (uint256)"];
-const ROUTER_ABI = ["function mixSwap(address fromToken, address toToken, uint256 fromAmount, uint256 resAmount, uint256 minReturnAmount, address[] memory proxyList, address[] memory poolList, address[] memory routeList, uint256 direction, bytes[] memory moreInfos, uint256 deadLine) external payable returns (uint256)"];
-const LP_ABI = ["function addDVMLiquidity(address dvmAddress, uint256 baseInAmount, uint256 quoteInAmount, uint256 baseMinAmount, uint256 quoteMinAmount, uint8 flag, uint256 deadLine) external payable returns (uint256, uint256, uint256)"];
 
 // ===================================================================================
 // FUNGSI UTILITAS
@@ -74,6 +86,8 @@ async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 function randomDelay() { return Math.floor(Math.random() * (config.maxDelay - config.minDelay + 1)) + config.minDelay; }
+// PERUBAHAN: Fungsi helper untuk mendapatkan jumlah acak dalam range
+function getRandomAmount(min, max) { return Math.random() * (max - min) + min; }
 
 // ===================================================================================
 // INISIALISASI PROVIDER & WALLET
@@ -83,14 +97,14 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // ===================================================================================
-// FUNGSI INTI (DENGAN KECERDASAN SALDO)
+// FUNGSI INTI
 // ===================================================================================
 
 const getApiHeaders = (customHeaders = {}) => ({
     "Accept": "application/json, text/plain, */*", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36", "Origin": "https://testnet.pharosnetwork.xyz", "Referer": "https://testnet.pharosnetwork.xyz/", ...customHeaders
 });
 
-async function makeApiRequest(method, url, data, customHeaders = {}, maxRetries = 3) { /* ... (fungsi ini tidak berubah) ... */ 
+async function makeApiRequest(method, url, data, customHeaders = {}, maxRetries = 3) {
     let lastError = null;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -109,7 +123,7 @@ async function makeApiRequest(method, url, data, customHeaders = {}, maxRetries 
     throw new Error(`Gagal membuat request API ke ${url} setelah ${maxRetries} percobaan.`);
 }
 
-async function getNextNonce() { /* ... (fungsi ini tidak berubah) ... */ 
+async function getNextNonce() {
     try {
         const pendingNonce = await provider.getTransactionCount(wallet.address, "pending");
         const lastUsedNonce = nonceTracker[wallet.address] || pendingNonce - 1;
@@ -142,44 +156,39 @@ async function executeSwap(swapCount, fromToken, toToken) {
     const toTokenName = toToken === PHRS_ADDRESS ? "PHRS" : "USDT";
 
     try {
-        let fromAmount;
+        let amountToSwap;
         let balance;
+        let decimals;
 
-        // --- PERBAIKAN: Logika Cerdas untuk menentukan jumlah dan memeriksa saldo ---
+        // --- PERUBAHAN: Logika Cerdas untuk menentukan jumlah berdasarkan range manual ---
         if (fromToken === USDT_ADDRESS) {
+            decimals = 6;
             const usdtContract = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, wallet);
             balance = await usdtContract.balanceOf(wallet.address);
-            // Ambil 25% - 50% dari saldo USDT yang ada
-            const percentageToSwap = (Math.random() * (0.50 - 0.25) + 0.25);
-            fromAmount = balance * BigInt(Math.floor(percentageToSwap * 100)) / 100n;
-            
-            if (fromAmount < ethers.parseUnits("0.1", 6)) { // Jangan swap jika hasilnya terlalu kecil
-                addLog(`Saldo USDT terlalu kecil untuk di-swap, melewati.`, "warn");
-                return false;
-            }
-
+            amountToSwap = getRandomAmount(config.usdt.min, config.usdt.max);
         } else { // fromToken adalah PHRS
+            decimals = 18;
             balance = await provider.getBalance(wallet.address);
-            // Sisa saldo setelah dikurangi cadangan gas
-            const swappableBalance = balance - config.gasBuffer;
-            if (swappableBalance <= 0) {
-                addLog(`Saldo PHRS tidak cukup untuk swap + gas, melewati.`, "warn");
-                return false;
-            }
-            // Ambil 5% - 10% dari saldo PHRS yang bisa di-swap
-            const percentageToSwap = (Math.random() * (0.10 - 0.05) + 0.05);
-            fromAmount = swappableBalance * BigInt(Math.floor(percentageToSwap * 100)) / 100n;
+            amountToSwap = getRandomAmount(config.phrs.min, config.phrs.max);
         }
-        
-        const decimals = fromToken === PHRS_ADDRESS ? 18 : 6;
-        addLog(`Swap #${swapCount}: Mempersiapkan swap ${parseFloat(ethers.formatUnits(fromAmount, decimals)).toFixed(4)} ${fromTokenName} ke ${toTokenName}`, "info");
+
+        const fromAmountInWei = ethers.parseUnits(amountToSwap.toFixed(decimals), decimals);
+
+        // --- KECERDASAN LAMA YANG DIpertahankan: Cek Saldo ---
+        const requiredBalance = fromToken === PHRS_ADDRESS ? fromAmountInWei + config.gasBuffer : fromAmountInWei;
+        if (balance < requiredBalance) {
+            addLog(`Saldo ${fromTokenName} tidak cukup untuk swap. Dibutuhkan: ~${parseFloat(ethers.formatUnits(requiredBalance, decimals)).toFixed(4)}, Tersedia: ${parseFloat(ethers.formatUnits(balance, decimals)).toFixed(4)}. Melewati swap.`, "warn");
+            return false;
+        }
+
+        addLog(`Swap #${swapCount}: Mempersiapkan swap ${amountToSwap.toFixed(4)} ${fromTokenName} ke ${toTokenName}`, "info");
 
         if (fromToken !== PHRS_ADDRESS) {
             const tokenContract = new ethers.Contract(fromToken, ERC20_ABI, wallet);
-            if (!await checkAndApproveToken(tokenContract, fromAmount, fromTokenName, ROUTER_ADDRESS)) return false;
+            if (!await checkAndApproveToken(tokenContract, fromAmountInWei, fromTokenName, ROUTER_ADDRESS)) return false;
         }
-
-        const url = `https://api.dodoex.io/route-service/v2/widget/getdodoroute?chainId=688688&deadLine=${Math.floor(Date.now() / 1000) + 600}&apikey=a37546505892e1a952&slippage=10.401&fromTokenAddress=${fromToken}&toTokenAddress=${toToken}&userAddr=${wallet.address}&fromAmount=${fromAmount}`;
+        
+        const url = `https://api.dodoex.io/route-service/v2/widget/getdodoroute?chainId=688688&deadLine=${Math.floor(Date.now() / 1000) + 600}&apikey=a37546505892e1a952&slippage=10.401&fromTokenAddress=${fromToken}&toTokenAddress=${toToken}&userAddr=${wallet.address}&fromAmount=${fromAmountInWei}`;
         const routeResponse = await makeApiRequest("get", url);
         if (!routeResponse || routeResponse.status !== 200 || !routeResponse.data) {
             addLog(`Gagal mendapatkan rute dari Dodo: ${routeResponse?.message || 'No response'}`, "error");
@@ -200,7 +209,7 @@ async function executeSwap(swapCount, fromToken, toToken) {
     }
 }
 
-async function loginAndGetJwt() { /* ... (fungsi ini tidak berubah) ... */ 
+async function loginAndGetJwt() {
     addLog("Mencoba login untuk mendapatkan JWT...", "info");
     try {
         const message = "pharos";
@@ -215,7 +224,7 @@ async function loginAndGetJwt() { /* ... (fungsi ini tidak berubah) ... */
     } catch (error) { addLog(`Error saat login: ${error.message}`, "error"); return false; }
 }
 
-async function dailyCheckIn() { /* ... (fungsi ini tidak berubah) ... */ 
+async function dailyCheckIn() {
     if (!jwtToken) { addLog("Tidak ada JWT, check-in dilewati.", "warn"); return; }
     addLog("Melakukan daily check-in...", "info");
     try {
@@ -226,20 +235,16 @@ async function dailyCheckIn() { /* ... (fungsi ini tidak berubah) ... */
     } catch (error) { addLog(`Error saat check-in: ${error.message}`, "error"); }
 }
 
-async function checkBalances() { /* ... (fungsi ini tidak berubah) ... */
+async function checkBalances() {
     addLog("Mengecek saldo wallet...", "info");
     try {
         const phrsBalance = await provider.getBalance(wallet.address);
         const usdtContract = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, provider);
         const usdtBalance = await usdtContract.balanceOf(wallet.address);
-        const wphrsContract = new ethers.Contract(WPHRS_ADDRESS, ERC20_ABI, provider);
-        const wphrsBalance = await wphrsContract.balanceOf(wallet.address);
 
         addLog(`PHRS: ${chalk.cyan(parseFloat(ethers.formatEther(phrsBalance)).toFixed(4))}`, "info");
         addLog(`USDT: ${chalk.cyan(parseFloat(ethers.formatUnits(usdtBalance, 6)).toFixed(4))}`, "info");
-        addLog(`WPHRS: ${chalk.cyan(parseFloat(ethers.formatEther(wphrsBalance)).toFixed(4))}`, "info");
-        // PERBAIKAN: Kembalikan nilai saldo agar bisa digunakan fungsi lain
-        return { phrsBalance, usdtBalance, wphrsBalance };
+        return { phrsBalance };
     } catch (error) {
         addLog(`Gagal mengecek saldo: ${error.message}`, "error");
         throw new Error(`Tidak bisa melanjutkan karena gagal mengecek saldo awal. Pastikan RPC benar.`);
@@ -258,9 +263,8 @@ async function main() {
 
     const initialBalances = await checkBalances();
 
-    // --- PERBAIKAN: Cek saldo gas utama di awal ---
     if (initialBalances.phrsBalance < config.gasBuffer) {
-        addLog("SALDO PHRS TIDAK CUKUP UNTUK BIAYA GAS. Proses dihentikan.", "error");
+        addLog(`SALDO PHRS (${ethers.formatEther(initialBalances.phrsBalance)} PHRS) TIDAK CUKUP UNTUK BIAYA GAS MINIMUM (${ethers.formatEther(config.gasBuffer)} PHRS). Proses dihentikan.`, "error");
         return;
     }
 
@@ -269,7 +273,6 @@ async function main() {
         return;
     }
 
-    // --- Modul Swap ---
     try {
         addLog(chalk.bold.blue("--- Memulai Modul Swap ---"), "info");
         for (let i = 1; i <= config.swapRepetitions; i++) {
@@ -283,12 +286,7 @@ async function main() {
     } catch (error) {
         addLog(`Terjadi error pada Modul Swap: ${error.message}`, "error");
     }
-
-    // --- Modul Add Liquidity (Contoh implementasi cerdas di masa depan) ---
-    // Untuk saat ini, kita bisa lewati dulu karena kompleksitasnya
-    addLog(chalk.bold.blue("--- Modul Add Liquidity (Dilewati) ---"), "info");
-
-    // --- Modul Daily Check-in ---
+    
     try {
         await dailyCheckIn();
     } catch(error) {
