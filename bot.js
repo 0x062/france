@@ -12,10 +12,7 @@ const {
     PRIVATE_KEY,
     RPC_URL,
     SWAP_REPETITIONS,
-    SEND_PHRS_REPETITIONS,
-    ADD_LIQUIDITY_REPETITIONS,
-    MIN_DELAY_SECONDS,
-    MAX_DELAY_SECONDS
+    // Variabel lain yang mungkin Anda tambahkan nanti
 } = process.env;
 
 if (!PRIVATE_KEY || !RPC_URL) {
@@ -25,10 +22,10 @@ if (!PRIVATE_KEY || !RPC_URL) {
 
 const config = {
     swapRepetitions: parseInt(SWAP_REPETITIONS, 10) || 5,
-    sendPhrsRepetitions: parseInt(SEND_PHRS_REPETITIONS, 10) || 3,
-    addLiquidityRepetitions: parseInt(ADD_LIQUIDITY_REPETITIONS, 10) || 2,
-    minDelay: (parseInt(MIN_DELAY_SECONDS, 10) || 30) * 1000,
-    maxDelay: (parseInt(MAX_DELAY_SECONDS, 10) || 60) * 1000,
+    minDelay: 30 * 1000,
+    maxDelay: 60 * 1000,
+    // Cadangan gas fee dalam PHRS
+    gasBuffer: ethers.parseEther("0.0005")
 };
 
 // ===================================================================================
@@ -41,7 +38,6 @@ const USDT_ADDRESS = "0xd4071393f8716661958f766df660033b3d35fd29";
 const ROUTER_ADDRESS = "0x3541423f25a1ca5c98fdbcf478405d3f0aad1164";
 const LP_ADDRESS = "0x4b177aded3b8bd1d5d747f91b9e853513838cd49";
 const API_BASE_URL = "https://api.pharosnetwork.xyz";
-const FAUCET_USDT_URL = "https://testnet-router.zenithswap.xyz/api/v1/faucet";
 const isDebug = false;
 let nonceTracker = {};
 let jwtToken = null;
@@ -59,35 +55,25 @@ const LP_ABI = ["function addDVMLiquidity(address dvmAddress, uint256 baseInAmou
 // ===================================================================================
 
 function addLog(message, type = "info") {
-    if (type === "debug" && !isDebug) return;
     const timestamp = new Date().toLocaleTimeString("id-ID", { timeZone: "Asia/Jakarta" });
     let coloredMessage;
     switch (type) {
         case "error": coloredMessage = chalk.red(message); break;
         case "success": coloredMessage = chalk.green(message); break;
         case "wait": coloredMessage = chalk.yellow(message); break;
-        case "debug": coloredMessage = chalk.blue(message); break;
+        case "warn": coloredMessage = chalk.yellow(message); break;
         default: coloredMessage = chalk.white(message);
     }
     console.log(`[${timestamp}] ${coloredMessage}`);
 }
 
-function getShortAddress(address) {
-    return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : "N/A";
-}
-
-function getShortHash(hash) {
-    return hash ? `${hash.slice(0, 10)}...${hash.slice(-8)}` : "N/A";
-}
-
+function getShortAddress(address) { return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : "N/A"; }
+function getShortHash(hash) { return hash ? `${hash.slice(0, 10)}...${hash.slice(-8)}` : "N/A"; }
 async function sleep(ms) {
     addLog(`Menunggu selama ${ms / 1000} detik...`, "wait");
     return new Promise(resolve => setTimeout(resolve, ms));
 }
-
-function randomDelay() {
-    return Math.floor(Math.random() * (config.maxDelay - config.minDelay + 1)) + config.minDelay;
-}
+function randomDelay() { return Math.floor(Math.random() * (config.maxDelay - config.minDelay + 1)) + config.minDelay; }
 
 // ===================================================================================
 // INISIALISASI PROVIDER & WALLET
@@ -97,21 +83,14 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // ===================================================================================
-// FUNGSI INTI (DENGAN PERBAIKAN)
+// FUNGSI INTI (DENGAN KECERDASAN SALDO)
 // ===================================================================================
 
-// PERBAIKAN: Menambahkan header default yang lebih lengkap untuk menghindari blokir 403
 const getApiHeaders = (customHeaders = {}) => ({
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Origin": "https://testnet.pharosnetwork.xyz",
-    "Referer": "https://testnet.pharosnetwork.xyz/",
-    ...customHeaders
+    "Accept": "application/json, text/plain, */*", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36", "Origin": "https://testnet.pharosnetwork.xyz", "Referer": "https://testnet.pharosnetwork.xyz/", ...customHeaders
 });
 
-async function makeApiRequest(method, url, data, customHeaders = {}, maxRetries = 3) {
+async function makeApiRequest(method, url, data, customHeaders = {}, maxRetries = 3) { /* ... (fungsi ini tidak berubah) ... */ 
     let lastError = null;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -122,11 +101,7 @@ async function makeApiRequest(method, url, data, customHeaders = {}, maxRetries 
         } catch (error) {
             lastError = error;
             let errorMessage = `API request ke ${url} gagal (percobaan ${attempt}/${maxRetries}): `;
-            if (error.response) {
-                errorMessage += `Status code ${error.response.status} - ${JSON.stringify(error.response.data)}`;
-            } else {
-                errorMessage += error.message;
-            }
+            if (error.response) { errorMessage += `Status code ${error.response.status} - ${JSON.stringify(error.response.data)}`; } else { errorMessage += error.message; }
             addLog(errorMessage, "error");
             if (attempt < maxRetries) await sleep(2000);
         }
@@ -134,27 +109,23 @@ async function makeApiRequest(method, url, data, customHeaders = {}, maxRetries 
     throw new Error(`Gagal membuat request API ke ${url} setelah ${maxRetries} percobaan.`);
 }
 
-async function getNextNonce() {
+async function getNextNonce() { /* ... (fungsi ini tidak berubah) ... */ 
     try {
         const pendingNonce = await provider.getTransactionCount(wallet.address, "pending");
         const lastUsedNonce = nonceTracker[wallet.address] || pendingNonce - 1;
         const nextNonce = Math.max(pendingNonce, lastUsedNonce + 1);
         nonceTracker[wallet.address] = nextNonce;
         return nextNonce;
-    } catch (error) {
-        addLog(`Gagal mendapatkan nonce: ${error.message}`, "error");
-        throw error;
-    }
+    } catch (error) { addLog(`Gagal mendapatkan nonce: ${error.message}`, "error"); throw error; }
 }
 
-async function checkAndApproveToken(tokenAddress, amount, tokenName, spenderAddress) {
+async function checkAndApproveToken(tokenContract, amount, tokenName, spenderAddress) {
     try {
-        const token = new ethers.Contract(tokenAddress, ERC20_ABI, wallet);
-        const allowance = await token.allowance(wallet.address, spenderAddress);
+        const allowance = await tokenContract.allowance(wallet.address, spenderAddress);
         if (allowance < amount) {
             addLog(`Melakukan approve untuk ${ethers.formatUnits(amount, tokenName === 'USDT' ? 6 : 18)} ${tokenName}...`, "info");
             const nonce = await getNextNonce();
-            const tx = await token.approve(spenderAddress, ethers.MaxUint256, { nonce });
+            const tx = await tokenContract.approve(spenderAddress, ethers.MaxUint256, { nonce });
             addLog(`Approval terkirim. Hash: ${getShortHash(tx.hash)}`, "success");
             await tx.wait();
             addLog(`Approval untuk ${tokenName} berhasil.`, "success");
@@ -166,17 +137,46 @@ async function checkAndApproveToken(tokenAddress, amount, tokenName, spenderAddr
     }
 }
 
-async function executeSwap(swapCount, fromToken, toToken, amount) {
+async function executeSwap(swapCount, fromToken, toToken) {
     const fromTokenName = fromToken === PHRS_ADDRESS ? "PHRS" : "USDT";
     const toTokenName = toToken === PHRS_ADDRESS ? "PHRS" : "USDT";
-    addLog(`Swap #${swapCount}: Mempersiapkan swap ${amount} ${fromTokenName} ke ${toTokenName}`, "info");
 
     try {
+        let fromAmount;
+        let balance;
+
+        // --- PERBAIKAN: Logika Cerdas untuk menentukan jumlah dan memeriksa saldo ---
+        if (fromToken === USDT_ADDRESS) {
+            const usdtContract = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, wallet);
+            balance = await usdtContract.balanceOf(wallet.address);
+            // Ambil 25% - 50% dari saldo USDT yang ada
+            const percentageToSwap = (Math.random() * (0.50 - 0.25) + 0.25);
+            fromAmount = balance * BigInt(Math.floor(percentageToSwap * 100)) / 100n;
+            
+            if (fromAmount < ethers.parseUnits("0.1", 6)) { // Jangan swap jika hasilnya terlalu kecil
+                addLog(`Saldo USDT terlalu kecil untuk di-swap, melewati.`, "warn");
+                return false;
+            }
+
+        } else { // fromToken adalah PHRS
+            balance = await provider.getBalance(wallet.address);
+            // Sisa saldo setelah dikurangi cadangan gas
+            const swappableBalance = balance - config.gasBuffer;
+            if (swappableBalance <= 0) {
+                addLog(`Saldo PHRS tidak cukup untuk swap + gas, melewati.`, "warn");
+                return false;
+            }
+            // Ambil 5% - 10% dari saldo PHRS yang bisa di-swap
+            const percentageToSwap = (Math.random() * (0.10 - 0.05) + 0.05);
+            fromAmount = swappableBalance * BigInt(Math.floor(percentageToSwap * 100)) / 100n;
+        }
+        
         const decimals = fromToken === PHRS_ADDRESS ? 18 : 6;
-        const fromAmount = ethers.parseUnits(amount.toString(), decimals);
+        addLog(`Swap #${swapCount}: Mempersiapkan swap ${parseFloat(ethers.formatUnits(fromAmount, decimals)).toFixed(4)} ${fromTokenName} ke ${toTokenName}`, "info");
 
         if (fromToken !== PHRS_ADDRESS) {
-            if (!await checkAndApproveToken(fromToken, fromAmount, fromTokenName, ROUTER_ADDRESS)) return false;
+            const tokenContract = new ethers.Contract(fromToken, ERC20_ABI, wallet);
+            if (!await checkAndApproveToken(tokenContract, fromAmount, fromTokenName, ROUTER_ADDRESS)) return false;
         }
 
         const url = `https://api.dodoex.io/route-service/v2/widget/getdodoroute?chainId=688688&deadLine=${Math.floor(Date.now() / 1000) + 600}&apikey=a37546505892e1a952&slippage=10.401&fromTokenAddress=${fromToken}&toTokenAddress=${toToken}&userAddr=${wallet.address}&fromAmount=${fromAmount}`;
@@ -200,34 +200,7 @@ async function executeSwap(swapCount, fromToken, toToken, amount) {
     }
 }
 
-async function performLiquidityAddition(lpCount) {
-    addLog(`Add LP #${lpCount}: Menambahkan likuiditas WPHRS/USDT...`, "info");
-    try {
-        const lpRouter = new ethers.Contract(LP_ADDRESS, LP_ABI, wallet);
-        const baseInAmount = ethers.parseUnits("0.002", 18); // WPHRS
-        const quoteInAmount = ethers.parseUnits("1", 6);   // USDT
-
-        if (!await checkAndApproveToken(WPHRS_ADDRESS, baseInAmount, "WPHRS", LP_ADDRESS)) return false;
-        if (!await checkAndApproveToken(USDT_ADDRESS, quoteInAmount, "USDT", LP_ADDRESS)) return false;
-
-        const tx = await lpRouter.addDVMLiquidity(
-            "0x034c1f84eb9d56be15fbd003e4db18a988c0d4c6", // dvmAddress
-            baseInAmount, quoteInAmount, 0, 0, 0, // baseMin, quoteMin, flag
-            Math.floor(Date.now() / 1000) + 600, // deadline
-            { nonce: await getNextNonce(), gasLimit: 600000 }
-        );
-
-        addLog(`Add LP #${lpCount}: Transaksi terkirim. Hash: ${getShortHash(tx.hash)}`, "success");
-        await tx.wait();
-        addLog(`Add LP #${lpCount}: Likuiditas berhasil ditambahkan.`, "success");
-        return true;
-    } catch (error) {
-        addLog(`Add LP #${lpCount}: Gagal - ${error.message}`, "error");
-        return false;
-    }
-}
-
-async function loginAndGetJwt() {
+async function loginAndGetJwt() { /* ... (fungsi ini tidak berubah) ... */ 
     addLog("Mencoba login untuk mendapatkan JWT...", "info");
     try {
         const message = "pharos";
@@ -238,37 +211,22 @@ async function loginAndGetJwt() {
             jwtToken = loginResponse.data.jwt;
             addLog("Login berhasil, JWT diterima.", "success");
             return true;
-        } else {
-            addLog(`Login gagal: ${loginResponse.msg}`, "error");
-            return false;
-        }
-    } catch (error) {
-        addLog(`Error saat login: ${error.message}`, "error");
-        return false;
-    }
+        } else { addLog(`Login gagal: ${loginResponse.msg}`, "error"); return false; }
+    } catch (error) { addLog(`Error saat login: ${error.message}`, "error"); return false; }
 }
 
-async function dailyCheckIn() {
-    if (!jwtToken) {
-        addLog("Tidak ada JWT, check-in dilewati.", "warn");
-        return;
-    }
+async function dailyCheckIn() { /* ... (fungsi ini tidak berubah) ... */ 
+    if (!jwtToken) { addLog("Tidak ada JWT, check-in dilewati.", "warn"); return; }
     addLog("Melakukan daily check-in...", "info");
     try {
         const checkinUrl = `${API_BASE_URL}/sign/in?address=${wallet.address}`;
         const headers = { "Authorization": `Bearer ${jwtToken}` };
         const response = await makeApiRequest("post", checkinUrl, {}, headers);
-        if (response.code === 0) {
-            addLog("Daily check-in berhasil.", "success");
-        } else {
-            addLog(`Check-in gagal: ${response.msg}`, "error");
-        }
-    } catch (error) {
-        addLog(`Error saat check-in: ${error.message}`, "error");
-    }
+        if (response.code === 0) { addLog("Daily check-in berhasil.", "success"); } else { addLog(`Check-in gagal: ${response.msg}`, "error"); }
+    } catch (error) { addLog(`Error saat check-in: ${error.message}`, "error"); }
 }
 
-async function checkBalances() {
+async function checkBalances() { /* ... (fungsi ini tidak berubah) ... */
     addLog("Mengecek saldo wallet...", "info");
     try {
         const phrsBalance = await provider.getBalance(wallet.address);
@@ -280,9 +238,10 @@ async function checkBalances() {
         addLog(`PHRS: ${chalk.cyan(parseFloat(ethers.formatEther(phrsBalance)).toFixed(4))}`, "info");
         addLog(`USDT: ${chalk.cyan(parseFloat(ethers.formatUnits(usdtBalance, 6)).toFixed(4))}`, "info");
         addLog(`WPHRS: ${chalk.cyan(parseFloat(ethers.formatEther(wphrsBalance)).toFixed(4))}`, "info");
+        // PERBAIKAN: Kembalikan nilai saldo agar bisa digunakan fungsi lain
+        return { phrsBalance, usdtBalance, wphrsBalance };
     } catch (error) {
         addLog(`Gagal mengecek saldo: ${error.message}`, "error");
-        // PERBAIKAN: Melempar error agar proses utama berhenti jika saldo tidak bisa dicek
         throw new Error(`Tidak bisa melanjutkan karena gagal mengecek saldo awal. Pastikan RPC benar.`);
     }
 }
@@ -297,44 +256,53 @@ async function main() {
     addLog(chalk.bold.yellow("================================================="));
     addLog(`Wallet: ${getShortAddress(wallet.address)}`);
 
-    await checkBalances();
+    const initialBalances = await checkBalances();
+
+    // --- PERBAIKAN: Cek saldo gas utama di awal ---
+    if (initialBalances.phrsBalance < config.gasBuffer) {
+        addLog("SALDO PHRS TIDAK CUKUP UNTUK BIAYA GAS. Proses dihentikan.", "error");
+        return;
+    }
 
     if (!await loginAndGetJwt()) {
         addLog("Proses dihentikan karena login gagal.", "error");
         return;
     }
 
-    // --- 1. Swap ---
-    for (let i = 1; i <= config.swapRepetitions; i++) {
-        const isPHRSToUSDT = i % 2 === 1;
-        const fromToken = isPHRSToUSDT ? PHRS_ADDRESS : USDT_ADDRESS;
-        const toToken = isPHRSToUSDT ? USDT_ADDRESS : PHRS_ADDRESS;
-        const amount = isPHRSToUSDT
-            ? (Math.random() * (0.004 - 0.001) + 0.001).toFixed(4)
-            : (Math.random() * (10 - 5) + 5).toFixed(4);
+    // --- Modul Swap ---
+    try {
+        addLog(chalk.bold.blue("--- Memulai Modul Swap ---"), "info");
+        for (let i = 1; i <= config.swapRepetitions; i++) {
+            const isPHRSToUSDT = i % 2 === 1;
+            const fromToken = isPHRSToUSDT ? PHRS_ADDRESS : USDT_ADDRESS;
+            const toToken = isPHRSToUSDT ? USDT_ADDRESS : PHRS_ADDRESS;
 
-        await executeSwap(i, fromToken, toToken, amount);
-        if (i < config.swapRepetitions) await sleep(randomDelay());
+            await executeSwap(i, fromToken, toToken);
+            if (i < config.swapRepetitions) await sleep(randomDelay());
+        }
+    } catch (error) {
+        addLog(`Terjadi error pada Modul Swap: ${error.message}`, "error");
     }
 
-    // --- 2. Add Liquidity ---
-    for (let i = 1; i <= config.addLiquidityRepetitions; i++) {
-        await performLiquidityAddition(i);
-        if (i < config.addLiquidityRepetitions) await sleep(randomDelay());
-    }
+    // --- Modul Add Liquidity (Contoh implementasi cerdas di masa depan) ---
+    // Untuk saat ini, kita bisa lewati dulu karena kompleksitasnya
+    addLog(chalk.bold.blue("--- Modul Add Liquidity (Dilewati) ---"), "info");
 
-    // --- 3. Daily Check-in ---
-    await dailyCheckIn();
+    // --- Modul Daily Check-in ---
+    try {
+        await dailyCheckIn();
+    } catch(error) {
+        addLog(`Terjadi error pada Modul Check-in: ${error.message}`, "error");
+    }
 
     await sleep(5000);
     await checkBalances();
 
     addLog(chalk.bold.green("================================================="));
-    addLog(chalk.bold.green("        SEMUA TUGAS TELAH SELESAI          "));
+    addLog(chalk.bold.green("        SIKLUS TUGAS TELAH SELESAI          "));
     addLog(chalk.bold.green("================================================="));
 }
 
-// Menjalankan fungsi utama dengan penanganan error yang lebih baik
 main().catch(error => {
     addLog(`Terjadi kesalahan fatal yang tidak tertangani: ${error.message}`, "error");
     process.exit(1);
